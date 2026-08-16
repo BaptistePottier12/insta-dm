@@ -515,6 +515,15 @@ SEL_ZONE_MESSAGE = [
     'div[role="textbox"][contenteditable="true"]',
 ]
 
+# etape6 : svg[aria-label="Ajouter une photo ou une vidéo"] x=1329,y=849
+# parent = div[role=button] x=1321,y=841,w=40,h=40
+SEL_BOUTON_IMAGE = [
+    'div[role="button"]:has(svg[aria-label="Ajouter une photo ou une vidéo"])',
+    'svg[aria-label="Ajouter une photo ou une vidéo"]',
+]
+
+IMAGE_PATH = BASE_DIR / "image.png"
+
 
 # ============================================================
 #  ENVOI D'UN MESSAGE
@@ -553,6 +562,46 @@ def _selectionner_resultat(page, username):
     return False
 
 
+def _envoyer_image(page, username):
+    """
+    Envoie image.png via l'icone upload d'Instagram.
+    Utilise page.expect_file_chooser() pour intercepter le dialog fichier natif.
+    Retourne True si envoyee, False sinon.
+    """
+    if not IMAGE_PATH.is_file():
+        logger.info("Pas d'image a envoyer (%s absente)", IMAGE_PATH)
+        return True
+
+    logger.info("Envoi de l'image %s", IMAGE_PATH.name)
+
+    btn = trouver_element(page, SEL_BOUTON_IMAGE,
+                          "Ajouter une photo ou une vidéo",
+                          timeout=5000, etape="bouton-image")
+    if not btn:
+        logger.warning("Bouton upload image introuvable, image non envoyee")
+        return False
+
+    try:
+        with page.expect_file_chooser(timeout=5000) as fc_info:
+            cliquer_element(page, btn)
+        file_chooser = fc_info.value
+        file_chooser.set_files(str(IMAGE_PATH))
+        logger.info("Image selectionnee via file_chooser")
+    except PWTimeout:
+        logger.warning("File chooser non intercepte (timeout)")
+        return False
+    except Exception as e:
+        logger.warning("Erreur file_chooser : %s", e)
+        return False
+
+    page.wait_for_timeout(random.randint(2000, 4000))
+
+    page.keyboard.press("Enter")
+    logger.info("Image envoyee")
+    page.wait_for_timeout(random.randint(2000, 4000))
+    return True
+
+
 def _saisir_et_envoyer(page, zone_result, username, message, dry_run):
     cliquer_element(page, zone_result)
     page.wait_for_timeout(random.randint(500, 1200))
@@ -566,6 +615,8 @@ def _saisir_et_envoyer(page, zone_result, username, message, dry_run):
     page.keyboard.press("Enter")
     logger.info("Message envoye")
     page.wait_for_timeout(random.randint(2500, 4500))
+
+    _envoyer_image(page, username)
 
     blocage = detecter_blocage(page)
     if blocage:

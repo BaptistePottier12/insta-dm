@@ -141,7 +141,8 @@ JS_EXTRACT_ELEMENTS = """
 () => {
     const sels = 'input, textarea, button, [role=button], [role=textbox], ' +
                  '[contenteditable=true], [role=dialog], a, select, [role=tab], ' +
-                 '[role=menuitem], [role=option], [role=listbox], [role=combobox]';
+                 '[role=menuitem], [role=option], [role=listbox], [role=combobox], ' +
+                 'svg, [data-testid], label, [accept]';
     const elems = document.querySelectorAll(sels);
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -165,6 +166,8 @@ JS_EXTRACT_ELEMENTS = """
             placeholder: el.getAttribute('placeholder') || '',
             type: el.getAttribute('type') || '',
             name: el.getAttribute('name') || '',
+            accept: el.getAttribute('accept') || '',
+            dataTestId: el.getAttribute('data-testid') || '',
             className: cls.substring(0, 80),
             innerText: (el.innerText || '').substring(0, 60).replace(/\\n/g, ' '),
             href: el.tagName === 'A' ? (el.getAttribute('href') || '').substring(0, 100) : '',
@@ -189,20 +192,99 @@ JS_EXTRACT_DIALOG_HTML = """
 """
 
 
+JS_EXTRACT_UPLOAD_ZONE = """
+() => {
+    // Cherche tous les elements proches du textbox de message
+    const textbox = document.querySelector('div[role="textbox"][contenteditable="true"]');
+    if (!textbox) return {found: false, elements: []};
+
+    // Remonte au conteneur parent qui englobe textbox + icones
+    let container = textbox;
+    for (let i = 0; i < 5; i++) {
+        if (container.parentElement) container = container.parentElement;
+    }
+
+    const all = container.querySelectorAll('*');
+    const result = [];
+    for (const el of all) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+
+        const tag = el.tagName.toLowerCase();
+        let cls = el.className;
+        if (typeof cls !== 'string') cls = '';
+
+        const isInteresting = (
+            tag === 'svg' || tag === 'button' || tag === 'input' ||
+            tag === 'label' || tag === 'div' || tag === 'span' ||
+            el.getAttribute('role') === 'button' ||
+            el.getAttribute('type') === 'file' ||
+            el.getAttribute('accept') ||
+            el.getAttribute('data-testid') ||
+            el.getAttribute('aria-label')
+        );
+        if (!isInteresting) continue;
+
+        result.push({
+            tag: tag,
+            role: el.getAttribute('role') || '',
+            ariaLabel: el.getAttribute('aria-label') || '',
+            type: el.getAttribute('type') || '',
+            accept: el.getAttribute('accept') || '',
+            dataTestId: el.getAttribute('data-testid') || '',
+            title: el.getAttribute('title') || '',
+            className: cls.substring(0, 80),
+            innerText: (el.innerText || '').substring(0, 40).replace(/\\n/g, ' '),
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+            outerHTML: el.outerHTML.substring(0, 200),
+        });
+    }
+    return {found: true, elements: result};
+}
+"""
+
+
+def extraire_zone_upload(page, output_path):
+    """Extrait les elements autour de la zone de saisie pour trouver l'icone upload."""
+    data = page.evaluate(JS_EXTRACT_UPLOAD_ZONE)
+    lignes = []
+    if not data["found"]:
+        lignes.append("TEXTBOX NON TROUVE - impossible d'analyser la zone upload")
+    else:
+        lignes.append(f"Elements trouves autour du textbox : {len(data['elements'])}")
+        lignes.append("")
+        for el in data["elements"]:
+            lignes.append(f"--- {el['tag']} ---")
+            for k in ['role', 'ariaLabel', 'type', 'accept', 'dataTestId', 'title',
+                       'className', 'innerText']:
+                if el.get(k):
+                    lignes.append(f"  {k}: {el[k]}")
+            lignes.append(f"  pos: x={el['x']} y={el['y']} w={el['w']} h={el['h']}")
+            lignes.append(f"  html: {el['outerHTML']}")
+            lignes.append("")
+    output_path.write_text("\n".join(lignes), encoding="utf-8")
+    logger.info("Zone upload : %d elements extraits", len(data.get("elements", [])))
+
+
 def extraire_dom(page, output_path):
     """Extrait tous les elements interactifs visibles et ecrit dom.txt."""
     elements = page.evaluate(JS_EXTRACT_ELEMENTS)
 
     lignes = []
     header = (f"{'tag':<12} {'role':<12} {'aria-label':<30} {'placeholder':<25} "
-              f"{'type':<10} {'name':<15} {'innerText':<40} "
+              f"{'type':<10} {'name':<15} {'accept':<20} {'data-testid':<25} "
+              f"{'innerText':<40} "
               f"{'x':>5} {'y':>5} {'w':>5} {'h':>5} {'class'}")
     lignes.append(header)
-    lignes.append("=" * 200)
+    lignes.append("=" * 250)
 
     for el in elements:
         line = (f"{el['tag']:<12} {el['role']:<12} {el['ariaLabel']:<30} "
                 f"{el['placeholder']:<25} {el['type']:<10} {el['name']:<15} "
+                f"{el['accept']:<20} {el['dataTestId']:<25} "
                 f"{el['innerText'][:40]:<40} "
                 f"{el['x']:>5} {el['y']:>5} {el['w']:>5} {el['h']:>5} "
                 f"{el['className']}")
@@ -244,6 +326,7 @@ def capturer_etape(page, nom_etape):
     extraire_dom(page, dossier / "dom.txt")
     faire_ocr(capture_path, dossier / "ocr.txt")
     extraire_dialog_html(page, dossier / "html_dialog.txt")
+    extraire_zone_upload(page, dossier / "zone_upload.txt")
 
     blocage = detecter_blocage(page)
     if blocage:
@@ -285,6 +368,24 @@ ETAPES = [
         "     (Chat / Suivant / Next...)\n"
         "  2. Attends que la zone de saisie du message soit visible\n"
         "  Puis appuie sur Entree ici.",
+    ),
+    (
+        "etape5_zone_message_focus",
+        "On cherche l'icone d'upload image (photo/clip).\n"
+        "  1. Clique dans la zone de saisie du message\n"
+        "  2. NE CLIQUE SUR RIEN D'AUTRE\n"
+        "  3. Regarde les icones autour de la zone de saisie\n"
+        "  Puis appuie sur Entree ici.\n"
+        "  (On capture le DOM pour trouver le bouton upload)",
+    ),
+    (
+        "etape6_apres_clic_upload",
+        "Maintenant dans Chrome :\n"
+        "  1. Clique sur l'icone image/photo/clip\n"
+        "  2. Si un dialog fichier s'ouvre, ANNULE-le\n"
+        "  3. Reviens ici\n"
+        "  Puis appuie sur Entree ici.\n"
+        "  (On capture le DOM apres le clic pour voir les changements)",
     ),
 ]
 
