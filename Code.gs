@@ -11,29 +11,26 @@
 
 // ---------- CONFIGURATION ----------
 var CONFIG = {
-  SHEET_NAME: 'Campagne',
+  COL_CHECKBOX: 'Checkbox',
 
-  // Noms EXACTS des en-tetes en ligne 1. Le script les retrouve tout seul.
   HEADERS: {
-    coche:    'A_envoyer',    // case a cocher (TRUE / FALSE)
-    profil:   'Profil',       // cellule pouvant contenir plusieurs URL separees par des espaces
-    message:  'Message',      // texte a envoyer
-    url:      'URL_thread',   // ECRIT par le webhook
-    statut:   'Statut',       // ECRIT par le webhook
-    date:     'Date_envoi',   // ECRIT par le webhook
-    erreur:   'Erreur'        // ECRIT par le webhook
+    coche:    'Checkbox',
+    profil:   'Insta',
+    prenom:   'Prénom',
+    url:      'URL_thread',
+    date:     'Date_envoi',
+    erreur:   'Erreur'
   },
+
+  ONGLET_MESSAGE: 'Message',
 
   HEADER_ROW: 1,
 
-  // Colonnes que le webhook a le DROIT d'ecrire. Rien d'autre ne sera modifie.
-  WRITABLE: ['url', 'statut', 'date', 'erreur'],
+  WRITABLE: ['url', 'date', 'erreur'],
 
-  // Garde-fou : nombre max de cibles par lot.
   MAX_TARGETS: 40
 };
 
-// Le token n'est PAS stocke ici. Voir menu "Configurer le token".
 function getToken_() {
   var t = PropertiesService.getScriptProperties().getProperty('WEBHOOK_TOKEN');
   if (!t) throw new Error('Token absent. Menu Campagne DM > Configurer le token.');
@@ -70,22 +67,56 @@ function configurerToken() {
 }
 
 // ---------- OUTILS STRUCTURE ----------
-function getSheet_() {
-  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_NAME);
-  if (!sh) throw new Error('Feuille introuvable : ' + CONFIG.SHEET_NAME);
-  return sh;
+
+/**
+ * Renvoie tous les onglets du classeur qui possedent une colonne Checkbox.
+ * Chaque element : { sheet, colIdx }
+ */
+function getOnglets_() {
+  console.log('[getOnglets_] Scan de tous les onglets...');
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  var result = [];
+
+  for (var s = 0; s < sheets.length; s++) {
+    var sh = sheets[s];
+    var nom = sh.getName();
+    var lastCol = sh.getLastColumn();
+    if (lastCol === 0) {
+      console.log('[getOnglets_] ' + nom + ' : vide, ignore');
+      continue;
+    }
+
+    var entetes = sh.getRange(CONFIG.HEADER_ROW, 1, 1, lastCol).getValues()[0];
+    var trouve = false;
+    for (var i = 0; i < entetes.length; i++) {
+      if (String(entetes[i]).trim().toLowerCase() === CONFIG.COL_CHECKBOX.toLowerCase()) {
+        result.push({ sheet: sh, colIdx: i + 1 });
+        console.log('[getOnglets_] ' + nom + ' : Checkbox en colonne ' + (i + 1));
+        trouve = true;
+        break;
+      }
+    }
+    if (!trouve) {
+      console.log('[getOnglets_] ' + nom + ' : pas de colonne Checkbox');
+    }
+  }
+  console.log('[getOnglets_] ' + result.length + ' onglet(s) avec Checkbox');
+  return result;
 }
 
 /**
  * Retrouve l'index (1-based) de chaque colonne a partir de son en-tete.
- * Evite de cabler des lettres de colonnes en dur : si le client insere
- * une colonne, rien ne casse.
+ * Si requis est false, les colonnes manquantes sont ignorees au lieu de lever une erreur.
  */
-function mapColonnes_(sh) {
+function mapColonnes_(sh, requis) {
+  var nom = sh.getName();
   var lastCol = sh.getLastColumn();
   var entetes = sh.getRange(CONFIG.HEADER_ROW, 1, 1, lastCol).getValues()[0];
   var map = {};
   var manquantes = [];
+
+  console.log('[mapColonnes_] ' + nom + ' : en-tetes = ' + JSON.stringify(entetes));
 
   Object.keys(CONFIG.HEADERS).forEach(function(cle) {
     var attendu = String(CONFIG.HEADERS[cle]).trim().toLowerCase();
@@ -97,66 +128,104 @@ function mapColonnes_(sh) {
     else map[cle] = idx;
   });
 
-  if (manquantes.length) {
-    throw new Error('En-tetes manquants en ligne ' + CONFIG.HEADER_ROW + ' : ' + manquantes.join(', '));
+  console.log('[mapColonnes_] ' + nom + ' : map = ' + JSON.stringify(map) +
+              (manquantes.length ? ' | manquantes = ' + manquantes.join(', ') : ''));
+
+  if (requis !== false && manquantes.length) {
+    throw new Error('En-tetes manquants dans "' + nom + '" : ' + manquantes.join(', '));
   }
-  console.log('Colonnes detectees : ' + JSON.stringify(map));
   return map;
 }
 
 function verifierStructure() {
   var ui = SpreadsheetApp.getUi();
-  try {
-    var sh = getSheet_();
-    var map = mapColonnes_(sh);
-    var lignes = sh.getLastRow() - CONFIG.HEADER_ROW;
-    ui.alert('Structure OK.\n\nFeuille : ' + CONFIG.SHEET_NAME +
-             '\nLignes de donnees : ' + lignes +
-             '\nColonnes : ' + JSON.stringify(map, null, 2));
-  } catch (e) {
-    ui.alert('Probleme de structure :\n\n' + e.message);
+  var onglets = getOnglets_();
+
+  if (!onglets.length) {
+    ui.alert('Aucun onglet avec une colonne "' + CONFIG.COL_CHECKBOX + '" trouve.');
+    return;
   }
+
+  var rapport = [];
+  onglets.forEach(function(o) {
+    var nom = o.sheet.getName();
+    var lignes = o.sheet.getLastRow() - CONFIG.HEADER_ROW;
+    var map = mapColonnes_(o.sheet, false);
+    var cols = Object.keys(map).map(function(k) { return k + '=' + map[k]; }).join(', ');
+    rapport.push(nom + ' : ' + lignes + ' lignes | ' + cols);
+  });
+
+  ui.alert('Structure OK.\n\n' + rapport.join('\n'));
 }
 
 // ---------- ETAPE 1 : GENERER LE LOT ----------
 function genererLot() {
   var ui = SpreadsheetApp.getUi();
   try {
-    var sh = getSheet_();
-    var map = mapColonnes_(sh);
-    var dernLigne = sh.getLastRow();
+    console.log('[genererLot] Debut');
+    var onglets = getOnglets_();
+    if (!onglets.length) {
+      ui.alert('Aucun onglet avec une colonne "' + CONFIG.COL_CHECKBOX + '" trouve.');
+      return;
+    }
 
-    if (dernLigne <= CONFIG.HEADER_ROW) { ui.alert('Aucune donnee.'); return; }
-
-    var nb = dernLigne - CONFIG.HEADER_ROW;
-    var valeurs = sh.getRange(CONFIG.HEADER_ROW + 1, 1, nb, sh.getLastColumn()).getValues();
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var shMsg = ss.getSheetByName(CONFIG.ONGLET_MESSAGE);
+    if (!shMsg) {
+      console.error('[genererLot] Onglet Message introuvable');
+      ui.alert('Onglet "' + CONFIG.ONGLET_MESSAGE + '" introuvable.');
+      return;
+    }
+    var messageTemplate = String(shMsg.getRange('A1').getValue() || '').trim();
+    if (!messageTemplate) {
+      ui.alert('La cellule A1 de l\'onglet "' + CONFIG.ONGLET_MESSAGE + '" est vide.');
+      return;
+    }
+    console.log('[genererLot] Template : ' + messageTemplate.substring(0, 60) + '...');
 
     var cibles = [];
     var ignorees = [];
 
-    for (var i = 0; i < valeurs.length; i++) {
-      var ligne = CONFIG.HEADER_ROW + 1 + i;
-      var row = valeurs[i];
+    onglets.forEach(function(o) {
+      var sh = o.sheet;
+      var nom = sh.getName();
+      var map = mapColonnes_(sh, false);
 
-      var coche = row[map.coche - 1];
-      if (coche !== true && String(coche).toUpperCase() !== 'TRUE') continue;
-
-      var statut = String(row[map.statut - 1] || '').trim();
-      if (statut.toLowerCase() === 'envoye') {
-        ignorees.push({ ligne: ligne, raison: 'deja envoye' });
-        continue;
+      if (!map.coche || !map.profil) {
+        console.log('[genererLot] ' + nom + ' : colonnes coche/profil manquantes, ignore');
+        return;
       }
 
-      var profil = String(row[map.profil - 1] || '').trim();
-      var message = String(row[map.message - 1] || '').trim();
+      var dernLigne = sh.getLastRow();
+      if (dernLigne <= CONFIG.HEADER_ROW) {
+        console.log('[genererLot] ' + nom + ' : aucune donnee');
+        return;
+      }
 
-      if (!profil) { ignorees.push({ ligne: ligne, raison: 'profil vide' }); continue; }
-      if (!message) { ignorees.push({ ligne: ligne, raison: 'message vide' }); continue; }
+      var nb = dernLigne - CONFIG.HEADER_ROW;
+      var valeurs = sh.getRange(CONFIG.HEADER_ROW + 1, 1, nb, sh.getLastColumn()).getValues();
+      var cochees = 0;
 
-      cibles.push({ row: ligne, profil_brut: profil, message: message });
-    }
+      for (var i = 0; i < valeurs.length; i++) {
+        var ligne = CONFIG.HEADER_ROW + 1 + i;
+        var row = valeurs[i];
 
-    console.log('Cibles retenues : ' + cibles.length + ' | ignorees : ' + ignorees.length);
+        var coche = row[map.coche - 1];
+        if (coche !== true && String(coche).toUpperCase() !== 'TRUE') continue;
+        cochees++;
+
+        var profil = String(row[map.profil - 1] || '').trim();
+        var prenom = map.prenom ? String(row[map.prenom - 1] || '').trim() : '';
+
+        if (!profil) { ignorees.push({ sheet: nom, ligne: ligne, raison: 'profil vide' }); continue; }
+
+        cibles.push({ sheet: nom, row: ligne, profil_brut: profil, prenom: prenom });
+      }
+      console.log('[genererLot] ' + nom + ' : ' + cochees + ' cochee(s), ' +
+                  cibles.length + ' cible(s) cumulees');
+    });
+
+    console.log('[genererLot] Total : ' + cibles.length + ' cible(s), ' + ignorees.length + ' ignoree(s)');
 
     if (!cibles.length) {
       ui.alert('Aucune ligne cochee exploitable.\n\nIgnorees : ' + JSON.stringify(ignorees));
@@ -170,18 +239,18 @@ function genererLot() {
 
     var payload = {
       generated_at: new Date().toISOString(),
-      sheet: CONFIG.SHEET_NAME,
       header_row: CONFIG.HEADER_ROW,
-      colonnes: map,
+      message_template: messageTemplate,
       webhook_url: ScriptApp.getService().getUrl(),
       cibles: cibles,
       ignorees: ignorees
     };
 
+    console.log('[genererLot] Payload genere, ' + cibles.length + ' cible(s)');
     afficherPayload_(payload);
 
   } catch (e) {
-    console.error(e);
+    console.error('[genererLot] ERREUR : ' + e.message + '\n' + e.stack);
     ui.alert('Erreur : ' + e.message);
   }
 }
@@ -190,10 +259,10 @@ function afficherPayload_(payload) {
   var json = JSON.stringify(payload, null, 2);
   var prompt =
     "Voici un lot de cibles Instagram genere depuis la Google Sheet.\n\n" +
-    "1. Verifie via le connecteur Drive que la structure de la feuille \"" + payload.sheet + "\" " +
+    "1. Verifie via le connecteur Drive que la structure des onglets " +
     "correspond bien aux colonnes declarees ci-dessous.\n" +
-    "2. Ecris ce JSON dans targets.json puis lance :\n" +
-    "   python send_dm.py --targets targets.json\n" +
+    "2. Ecris ce JSON dans targets.json puis lancer :\n" +
+    "   Start-Process -FilePath 'uv' -ArgumentList 'run','python','send_dm.py','--targets','targets.json' -WorkingDirectory 'C:\\Users\\Admin\\Documents\\Claude\\insta-dm' -WindowStyle Normal\n" +
     "3. Quand le script a fini, lis results.json, montre-moi le recap " +
     "et DEMANDE-MOI CONFIRMATION avant d'envoyer quoi que ce soit au webhook.\n\n" +
     "```json\n" + json + "\n```";
@@ -214,45 +283,23 @@ function afficherPayload_(payload) {
 }
 
 function decocherTout() {
-  var ONGLETS = [
-    'Modèles F', 'Modèles H',
-    'Photographe', 'MUA', 'Créateurs', 'Nail/Hair',
-    'Cinéma', 'Orga/PR/Lieu', 'Journaliste',
-    'Arts', 'Musique', 'Autre', 'Big event'
-  ];
-  var COL_CHECKBOX = 'Checkbox';
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  console.log('[decocherTout] Debut');
+  var onglets = getOnglets_();
   var total = 0;
   var traites = [];
 
-  ONGLETS.forEach(function(nom) {
-    var sh = ss.getSheetByName(nom);
-    if (!sh) return;
-
+  onglets.forEach(function(o) {
+    var sh = o.sheet;
     var dernLigne = sh.getLastRow();
     if (dernLigne <= 1) return;
 
-    var lastCol = sh.getLastColumn();
-    if (lastCol === 0) return;
-
-    var entetes = sh.getRange(1, 1, 1, lastCol).getValues()[0];
-    var colIdx = -1;
-
-    for (var i = 0; i < entetes.length; i++) {
-      if (String(entetes[i]).trim().toLowerCase() === COL_CHECKBOX.toLowerCase()) {
-        colIdx = i + 1;
-        break;
-      }
-    }
-    if (colIdx === -1) return;
-
     var nb = dernLigne - 1;
-    sh.getRange(2, colIdx, nb, 1).setValue(false);
+    sh.getRange(2, o.colIdx, nb, 1).setValue(false);
     total += nb;
-    traites.push(nom);
+    traites.push(sh.getName());
   });
 
-  console.log('Cases decochees : ' + total + ' sur ' + traites.join(', '));
+  console.log('[decocherTout] ' + total + ' cases decochees sur ' + traites.join(', '));
   SpreadsheetApp.getUi().alert(
     'Cases decochees : ' + total + ' lignes\n\nOnglets traites : ' + traites.join(', ')
   );
@@ -264,40 +311,47 @@ function decocherTout() {
  * {
  *   "token": "...",
  *   "updates": [
- *     { "row": 2, "url": "https://...", "statut": "Envoye", "erreur": "" }
+ *     { "sheet": "Photographe", "row": 2, "url": "https://...", "erreur": "" }
  *   ]
  * }
  */
-function doPost(e) {
+function doPostClaude(e) {
   var debut = new Date();
   var log = [];
 
+  console.log('[doPost] Requete recue');
+
   function repondre(obj, niveau) {
     obj.log = log;
-    console[niveau || 'log'](JSON.stringify(obj));
+    console[niveau || 'log']('[doPost] Reponse : ' + JSON.stringify(obj));
     return ContentService.createTextOutput(JSON.stringify(obj))
       .setMimeType(ContentService.MimeType.JSON);
   }
 
   try {
     if (!e || !e.postData || !e.postData.contents) {
+      console.error('[doPost] Corps de requete vide');
       return repondre({ ok: false, error: 'Corps de requete vide' }, 'error');
     }
+
+    console.log('[doPost] Body brut : ' + e.postData.contents.substring(0, 200));
 
     var data;
     try {
       data = JSON.parse(e.postData.contents);
     } catch (err) {
+      console.error('[doPost] JSON invalide : ' + err.message);
       return repondre({ ok: false, error: 'JSON invalide : ' + err.message }, 'error');
     }
 
-    // --- Authentification ---
     var attendu = getToken_();
     if (!data.token || data.token !== attendu) {
+      console.error('[doPost] Token refuse (recu: ' + String(data.token).substring(0, 10) + '...)');
       log.push('Token refuse');
       return repondre({ ok: false, error: 'Non autorise' }, 'error');
     }
     log.push('Token valide');
+    console.log('[doPost] Token OK');
 
     if (!Array.isArray(data.updates) || !data.updates.length) {
       return repondre({ ok: false, error: 'updates absent ou vide' }, 'error');
@@ -306,51 +360,87 @@ function doPost(e) {
       return repondre({ ok: false, error: 'Trop de mises a jour' }, 'error');
     }
 
-    var sh = getSheet_();
-    var map = mapColonnes_(sh);
-    var dernLigne = sh.getLastRow();
+    console.log('[doPost] ' + data.updates.length + ' update(s) a traiter');
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    console.log('[doPost] Spreadsheet : ' + ss.getName() + ' (id=' + ss.getId() + ')');
 
     var ecrites = 0;
     var rejetees = [];
+    var cache = {};
 
-    // Verrou : evite deux ecritures concurrentes.
     var lock = LockService.getScriptLock();
     if (!lock.tryLock(20000)) {
       return repondre({ ok: false, error: 'Feuille verrouillee, reessaie' }, 'error');
     }
 
     try {
-      data.updates.forEach(function(u) {
-        var ligne = parseInt(u.row, 10);
+      data.updates.forEach(function(u, idx) {
+        var nomOnglet = u.sheet;
+        console.log('[doPost] Update ' + (idx + 1) + ' : sheet=' + nomOnglet +
+                    ' row=' + u.row + ' url=' + (u.url || '').substring(0, 50));
 
-        // Validation stricte du numero de ligne.
-        if (isNaN(ligne) || ligne <= CONFIG.HEADER_ROW || ligne > dernLigne) {
-          rejetees.push({ row: u.row, raison: 'ligne hors bornes' });
+        if (!nomOnglet) {
+          rejetees.push({ row: u.row, raison: 'sheet manquant' });
           return;
         }
 
-        // Ecriture limitee aux colonnes autorisees.
+        if (!cache[nomOnglet]) {
+          var sh = ss.getSheetByName(nomOnglet);
+          if (!sh) {
+            console.error('[doPost] Onglet introuvable : "' + nomOnglet + '"');
+            var noms = ss.getSheets().map(function(s) { return s.getName(); });
+            console.log('[doPost] Onglets existants : ' + JSON.stringify(noms));
+            rejetees.push({ row: u.row, sheet: nomOnglet, raison: 'onglet introuvable' });
+            return;
+          }
+          console.log('[doPost] Onglet "' + nomOnglet + '" trouve, mappage colonnes...');
+          var map = mapColonnes_(sh, false);
+          cache[nomOnglet] = { sheet: sh, map: map, lastRow: sh.getLastRow() };
+        }
+
+        var ctx = cache[nomOnglet];
+        var ligne = parseInt(u.row, 10);
+
+        if (isNaN(ligne) || ligne <= CONFIG.HEADER_ROW || ligne > ctx.lastRow) {
+          console.error('[doPost] Ligne hors bornes : ' + u.row +
+                       ' (lastRow=' + ctx.lastRow + ')');
+          rejetees.push({ row: u.row, sheet: nomOnglet, raison: 'ligne hors bornes' });
+          return;
+        }
+
         CONFIG.WRITABLE.forEach(function(cle) {
-          if (!(cle in u)) return;
-          if (cle === 'date') return; // gere ci-dessous
+          if (!(cle in u) || !ctx.map[cle]) return;
+          if (cle === 'date') return;
           var valeur = u[cle];
           if (valeur === null || valeur === undefined) valeur = '';
-          sh.getRange(ligne, map[cle]).setValue(String(valeur).substring(0, 500));
+          ctx.sheet.getRange(ligne, ctx.map[cle]).setValue(String(valeur).substring(0, 500));
+          console.log('[doPost]   ' + nomOnglet + ' L' + ligne + ' : ' +
+                     cle + ' (col ' + ctx.map[cle] + ') = ' + String(valeur).substring(0, 60));
         });
 
-        sh.getRange(ligne, map.date).setValue(new Date());
+        if (ctx.map.date) {
+          ctx.sheet.getRange(ligne, ctx.map.date).setValue(new Date());
+          console.log('[doPost]   ' + nomOnglet + ' L' + ligne + ' : date = now');
+        }
 
-        // On decoche la ligne traitee pour eviter tout renvoi accidentel.
-        sh.getRange(ligne, map.coche).setValue(false);
+        if (ctx.map.coche) {
+          ctx.sheet.getRange(ligne, ctx.map.coche).setValue(false);
+          console.log('[doPost]   ' + nomOnglet + ' L' + ligne + ' : checkbox = false');
+        }
 
         ecrites++;
-        log.push('Ligne ' + ligne + ' mise a jour');
+        log.push(nomOnglet + ' ligne ' + ligne + ' mise a jour');
       });
 
       SpreadsheetApp.flush();
+      console.log('[doPost] Flush OK');
     } finally {
       lock.releaseLock();
     }
+
+    console.log('[doPost] Termine : ' + ecrites + ' ecrite(s), ' +
+                rejetees.length + ' rejetee(s), ' + (new Date() - debut) + 'ms');
 
     return repondre({
       ok: true,
@@ -360,12 +450,14 @@ function doPost(e) {
     });
 
   } catch (err) {
+    console.error('[doPost] EXCEPTION : ' + err.message + '\n' + err.stack);
     log.push('Exception : ' + err.message);
     return repondre({ ok: false, error: err.message, stack: err.stack }, 'error');
   }
 }
 
 function doGet() {
+  console.log('[doGet] Requete GET recue');
   return ContentService
     .createTextOutput(JSON.stringify({ ok: true, service: 'campagne-dm', method: 'POST attendu' }))
     .setMimeType(ContentService.MimeType.JSON);

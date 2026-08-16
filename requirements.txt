@@ -1,3 +1,5 @@
 playwright>=1.44
 python-dotenv>=1.0
 requests>=2.31
+pytesseract>=0.3
+Pillow>=10.0

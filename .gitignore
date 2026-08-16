@@ -1,6 +1,9 @@
 .env
+.venv/
 browser_profile/
 logs/
 results.json
 targets.json
+log.txt
 *.png
+__pycache__/
